@@ -12,12 +12,15 @@ import local_models # 导入新模块
 
 def generate_cot_description(image_path: str) -> str:
     """调用本地目标MLLM生成CoT描述"""
-    prompt = """请详细描述这张图片。请使用分步推理的方式，首先列出你观察到的关键视觉证据（至少3点），然后根据这些证据给出一个总结性描述。"""
+    # prompt_CN = """请详细描述这张图片。请使用分步推理的方式，首先列出你观察到的关键视觉证据（至少3点），然后根据这些证据给出一个总结性描述。"""
+    prompt = """Please describe this image in detail. Use a step-by-step reasoning approach: first, list the key visual evidence you observe (at least 3 points), then provide a summary description based on this evidence."""
+
     return local_models.generate_with_mllm(image_path, prompt)
 
 def parse_cot_to_claims(cot_text: str) -> dict:
-    """调用本地裁判模型(Llama-3)将CoT文本解析为原子断言"""
-    prompt = f"请将以下文本解析为'视觉证据'和'总结描述'的断言列表，并以JSON格式返回：\n\n{cot_text}"
+    """调用本地裁判模型将CoT文本解析为原子断言"""
+    # prompt_CN = f"请将以下文本解析为'视觉证据'和'总结描述'的断言列表，并以JSON格式返回：\n\n{cot_text}"
+    prompt = f"Please parse the following text into a list of assertions for 'Visual Evidence' and 'Summary Description', and return it in JSON format:\n\n{cot_text}"
     response_text = local_models.generate_with_llm(prompt)
     # ... 此处需要添加解析JSON的代码，例如 utils.parse_json(response_text) ...
     return {"visual_evidence": ["..."], "summary_description": ["..."]} # 示例
@@ -29,11 +32,15 @@ def label_claim_validity(image_path: str, claim: str) -> bool:
     1. 让MLLM生成一个简短的、高置信度的图像摘要。
     2. 让LLM判断断言是否与该摘要相符。
     """
-    context_prompt = "请用一句话简短描述这张图片的核心内容。"
+    # context_prompt_CN = "请用一句话简短描述这张图片的核心内容。"
+    context_prompt = "Please describe the core content of this image in one short sentence."
+
     context_description = local_models.generate_with_mllm(image_path, context_prompt)
     
     # 然后让LLM基于这个文字描述来判断
-    prompt = f"背景描述：'{context_description}'\n\n请判断以下断言是否与背景描述相符且合理？\n断言：'{claim}'\n请只回答‘是’或‘否’。"
+    # prompt_CN = f"背景描述：'{context_description}'\n\n请判断以下断言是否与背景描述相符且合理？\n断言：'{claim}'\n请只回答‘是’或‘否’。"
+    prompt = f"Background description: '{context_description}'\n\nPlease determine if the following assertion is consistent and reasonable with the background description?\nAssertion: '{claim}'\nPlease answer only 'Yes' or 'No'."
+
     response_text = local_models.generate_with_llm(prompt)
     return "是" in response_text
 

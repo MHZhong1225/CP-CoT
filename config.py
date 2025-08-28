@@ -7,11 +7,13 @@ TARGET_MLLM_NAME = "Qwen/Qwen2.5-7B-Instruct"
 
 # 裁判模型 (LLM)
 JUDGE_LLM_NAME = "openai/gpt-oss-20b"
+DATANAME = 'VQAv2'
+
 
 # --- Paths ---
-IMAGE_DIR = "./data/raw_images"
-CALIBRATION_SET_PATH = "./data/calibration_set.json"
-CALIBRATION_THRESHOLD_PATH = "./data/q_budget_threshold.json"
+IMAGE_DIR = f"./data/{DATANAME}/raw_images"
+CALIBRATION_SET_PATH = f"./data/{DATANAME}/calibration_set.json"
+CALIBRATION_THRESHOLD_PATH = f"./data/{DATANAME}/q_budget_threshold.json"
 
 # --- Hyperparameters ---
 ALPHA = 0.1  # 错误率

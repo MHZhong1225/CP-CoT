@@ -1,83 +1,119 @@
-# local_models.py
+# local_models.py (Memory-Efficient Version)
 import torch
-from transformers import AutoProcessor, LlavaForConditionalGeneration, AutoTokenizer, AutoModelForCausalLM
+import gc
+from transformers import AutoProcessor, AutoModelForCausalLM, AutoTokenizer
 from PIL import Image
 import config
 
-# --- 全局模型变量，确保只加载一次 ---
-target_mllm_model = None
-target_mllm_processor = None
-judge_llm_model = None
-judge_llm_tokenizer = None
+# --- We will no longer keep models in global variables to save memory ---
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-def load_models():
-    """加载所有需要的本地模型到内存中"""
-    global target_mllm_model, target_mllm_processor, judge_llm_model, judge_llm_tokenizer
-    
-    print("Loading Target MLLM...")
-    target_mllm_processor = AutoProcessor.from_pretrained(config.TARGET_MLLM_NAME)
-    target_mllm_model = LlavaForConditionalGeneration.from_pretrained(
-        config.TARGET_MLLM_NAME,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-        device_map="auto"
-    )
-    print("Target MLLM loaded.")
+def clear_memory():
+    """Clears GPU memory and runs garbage collection."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-    print("Loading Judge LLM...")
-    judge_llm_tokenizer = AutoTokenizer.from_pretrained(config.JUDGE_LLM_NAME)
-    judge_llm_model = AutoModelForCausalLM.from_pretrained(
-        config.JUDGE_LLM_NAME,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-        device_map="auto"
-    )
-    print("Judge LLM loaded.")
+# In local_models.py, replace the generate_with_mllm function with this:
 
 def generate_with_mllm(image_path: str, prompt: str) -> str:
-    """使用本地MLLM生成CoT描述"""
-    if not target_mllm_model:
-        load_models()
-        
-    raw_image = Image.open(image_path)
-    # LLaVA的prompt格式通常是 "USER: <image>\n{prompt}\nASSISTANT:"
-    full_prompt = f"USER: <image>\n{prompt}\nASSISTANT:"
+    """
+    Loads, uses, and then unloads the Target MLLM to generate a description.
+    """
+    clear_memory()
+    print("Loading Target MLLM...")
     
-    inputs = target_mllm_processor(full_prompt, images=raw_image, return_tensors="pt").to(device, torch.float16)
+    processor = AutoProcessor.from_pretrained(config.TARGET_MLLM_NAME)
+    model = AutoModelForCausalLM.from_pretrained(
+        config.TARGET_MLLM_NAME,
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True
+    ).to(device)
     
-    output = target_mllm_model.generate(**inputs, max_new_tokens=200, do_sample=False)
+    print("Target MLLM loaded. Generating...")
+    raw_image = Image.open(image_path).convert("RGB")
     
-    decoded_output = target_mllm_processor.decode(output[0], skip_special_tokens=True)
-    assistant_response = decoded_output.split("ASSISTANT:")[1].strip()
-    return assistant_response
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                # The processor expects the prompt text first for Qwen2-VL
+                {"type": "text", "text": prompt},
+                {"type": "image"} 
+            ]
+        }
+    ]
+    
+    # === CORRECTED BLOCK ===
+    # Do NOT use apply_chat_template. Pass the messages and image directly to the processor.
+    inputs = processor(text=messages, images=raw_image, return_tensors="pt").to(device)
+    # === END CORRECTION ===
+    
+    output = model.generate(**inputs, max_new_tokens=200, do_sample=False)
+    
+    # The decoding logic also needs to be simplified
+    decoded_output = processor.decode(output[0], skip_special_tokens=True).strip()
+
+    # The decoded output for Qwen2 includes the prompt, so we need to remove it.
+    # This is a bit complex, we find where the user part ends and take the rest.
+    try:
+        # A common separator is '<|im_end|>\n<|im_start|>assistant\n'
+        # We will split by the assistant's starting tag
+        response_part = decoded_output.split("assistant\n")[-1]
+    except:
+        response_part = decoded_output # Fallback if split fails
+
+    # --- Crucial Step: Release memory ---
+    del model
+    del processor
+    clear_memory()
+    print("Target MLLM unloaded.")
+    
+    return response_part
 
 def generate_with_llm(prompt: str) -> str:
-    """使用本地LLM（裁判）进行文本生成或判断"""
-    if not judge_llm_model:
-        load_models()
-        
+    """
+    Loads, uses, and then unloads the Judge LLM for text-only tasks.
+    """
+    clear_memory()
+    print("Loading Judge LLM...")
+    
+    tokenizer = AutoTokenizer.from_pretrained(config.JUDGE_LLM_NAME)
+    model = AutoModelForCausalLM.from_pretrained(
+        config.JUDGE_LLM_NAME,
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True
+    ).to(device)
+    
+    print("Judge LLM loaded. Generating...")
     messages = [
         {"role": "system", "content": "You are a helpful and precise assistant."},
         {"role": "user", "content": prompt},
     ]
-    input_ids = judge_llm_tokenizer.apply_chat_template(
+    input_ids = tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
         return_tensors="pt"
-    ).to(judge_llm_model.device)
+    ).to(model.device)
 
     terminators = [
-        judge_llm_tokenizer.eos_token_id,
-        judge_llm_tokenizer.convert_tokens_to_ids("<|eot_id|>")
+        tokenizer.eos_token_id,
+        tokenizer.convert_tokens_to_ids("<|eot_id|>")
     ]
 
-    outputs = judge_llm_model.generate(
+    outputs = model.generate(
         input_ids,
         max_new_tokens=256,
         eos_token_id=terminators,
         do_sample=False
     )
     response = outputs[0][input_ids.shape[-1]:]
-    decoded_response = judge_llm_tokenizer.decode(response, skip_special_tokens=True)
+    decoded_response = tokenizer.decode(response, skip_special_tokens=True)
+
+    # --- Crucial Step: Release memory ---
+    del model
+    del tokenizer
+    clear_memory()
+    print("Judge LLM unloaded.")
+    
     return decoded_response
