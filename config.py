@@ -3,8 +3,9 @@
 # --- Model Names (Local Hugging Face Identifiers) ---
 # 警告：请确保您有足够的VRAM来加载这些模型。
 # 目标模型 (MLLM) - LLaVA是一个很好的选择
-TARGET_MLLM_NAME = "Qwen/Qwen2.5-7B-Instruct" 
+# TARGET_MLLM_NAME = "Qwen/Qwen2.5-7B-Instruct" 
 
+TARGET_MLLM_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
 # 裁判模型 (LLM)
 JUDGE_LLM_NAME = "openai/gpt-oss-20b"
 DATANAME = 'VQAv2'
