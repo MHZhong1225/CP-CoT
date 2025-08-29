@@ -1,79 +1,113 @@
-# data_builder.py
+# data_builder.py (最终完美版 - 强化解析器)
 import os
 import json
-import requests  # Or openai library
-from PIL import Image
 from tqdm import tqdm
 import config
-# import utils
+import local_models
+import re # 导入正则表达式库
 
-# data_builder.py (部分修改)
-import local_models # 导入新模块
-
-def generate_cot_description(image_path: str) -> str:
-    """调用本地目标MLLM生成CoT描述"""
-    # prompt_CN = """请详细描述这张图片。请使用分步推理的方式，首先列出你观察到的关键视觉证据（至少3点），然后根据这些证据给出一个总结性描述。"""
-    prompt = """Please describe this image in detail. Use a step-by-step reasoning approach: first, list the key visual evidence you observe (at least 3 points), then provide a summary description based on this evidence."""
-
-    return local_models.generate_with_mllm(image_path, prompt)
-
-def parse_cot_to_claims(cot_text: str) -> dict:
-    """调用本地裁判模型将CoT文本解析为原子断言"""
-    # prompt_CN = f"请将以下文本解析为'视觉证据'和'总结描述'的断言列表，并以JSON格式返回：\n\n{cot_text}"
-    prompt = f"Please parse the following text into a list of assertions for 'Visual Evidence' and 'Summary Description', and return it in JSON format:\n\n{cot_text}"
-    response_text = local_models.generate_with_llm(prompt)
-    # ... 此处需要添加解析JSON的代码，例如 utils.parse_json(response_text) ...
-    return {"visual_evidence": ["..."], "summary_description": ["..."]} # 示例
-
-def label_claim_validity(image_path: str, claim: str) -> bool:
+def python_parse_cot_to_claims(cot_text: str) -> dict:
     """
-    调用本地模型判断断言的真伪。
-    注意：由于裁判LLM无法直接看图，我们采用一种两步策略：
-    1. 让MLLM生成一个简短的、高置信度的图像摘要。
-    2. 让LLM判断断言是否与该摘要相符。
+    一个稳定、高效且更强大的Python函数，用于直接从CoT文本中解析出断言。
+    这个版本可以处理多种列表格式（-, *, 1., 2. 等）。
     """
-    # context_prompt_CN = "请用一句话简短描述这张图片的核心内容。"
-    context_prompt = "Please describe the core content of this image in one short sentence."
-
-    context_description = local_models.generate_with_mllm(image_path, context_prompt)
+    claims = {
+        "visual_evidence": [],
+        "summary_description": []
+    }
     
-    # 然后让LLM基于这个文字描述来判断
-    # prompt_CN = f"背景描述：'{context_description}'\n\n请判断以下断言是否与背景描述相符且合理？\n断言：'{claim}'\n请只回答‘是’或‘否’。"
-    prompt = f"Background description: '{context_description}'\n\nPlease determine if the following assertion is consistent and reasonable with the background description?\nAssertion: '{claim}'\nPlease answer only 'Yes' or 'No'."
+    try:
+        # 使用正则表达式来寻找两个关键部分
+        visual_evidence_match = re.search(r"Key Visual Evidence:(.*?)Summary Description:", cot_text, re.DOTALL | re.IGNORECASE)
+        summary_description_match = re.search(r"Summary Description:(.*)", cot_text, re.DOTALL | re.IGNORECASE)
 
-    response_text = local_models.generate_with_llm(prompt)
-    return "是" in response_text
+        # --- FIX: 使用更强大的正则表达式来分割列表 ---
+        # 这个表达式可以匹配 -, *, 或 数字后跟一个点 (e.g., 1., 2.)
+        split_pattern = r'\n\s*(?:[-\*]|\d+\.)\s*'
+
+        if visual_evidence_match:
+            visual_text = visual_evidence_match.group(1).strip()
+            visual_claims = re.split(split_pattern, visual_text)
+            # 过滤掉可能产生的空字符串或无意义的短字符串
+            claims["visual_evidence"] = [claim.strip() for claim in visual_claims if len(claim.strip()) > 5]
+
+        if summary_description_match:
+            summary_text = summary_description_match.group(1).strip()
+            summary_claims = re.split(split_pattern, summary_text)
+            claims["summary_description"] = [claim.strip() for claim in summary_claims if len(claim.strip()) > 5]
+            
+    except Exception as e:
+        print(f"Error during Python parsing: {e}")
+
+    return claims
 
 
 def build_calibration_set():
-    """主函数，遍历图片，生成、解析、标注，最后保存数据集"""
-    calibration_data = []
-    image_files = [f for f in os.listdir(config.IMAGE_DIR) if f.endswith(('png', 'jpg'))]
+    """Builds the calibration set using the final robust Python parser."""
+    if os.path.exists(config.LLM_RAW_RESPONSE_LOG_PATH):
+        os.remove(config.LLM_RAW_RESPONSE_LOG_PATH)
 
-    for image_file in tqdm(image_files, desc="Building Calibration Set"):
+    all_image_files = [f for f in os.listdir(config.IMAGE_DIR) if f.endswith(('png', 'jpg'))]
+    image_files = all_image_files
+    # image_files = all_image_files[:5] # DEBUG: Process only 5 images first
+    print(f"--- Running with all {len(image_files)} images ---")
+    
+    # --- STAGE 1: MLLM Generation ---
+    print("--- STAGE 1: Generating all descriptions with MLLM ---")
+    mllm, mllm_processor = local_models.load_mllm()
+    generated_data = []
+    cot_prompt = "Please describe this image in detail. Use a step-by-step reasoning approach: first, list the key visual evidence you observe (at least 3 points), then provide a summary description based on this evidence."
+    context_prompt = "Please describe the core content of this image in one short sentence."
+    for image_file in tqdm(image_files, desc="1/2 - Generating CoTs & Contexts"):
         image_path = os.path.join(config.IMAGE_DIR, image_file)
+        cot_text = local_models.generate_with_mllm(mllm, mllm_processor, image_path, cot_prompt)
+        context_description = local_models.generate_with_mllm(mllm, mllm_processor, image_path, context_prompt)
+        generated_data.append({"image_path": image_path, "generated_cot": cot_text, "context_description": context_description})
+    del mllm, mllm_processor
+    local_models.clear_memory()
+    print("--- MLLM Unloaded ---")
+    with open(config.GENERATED_DATA_PATH, 'w', encoding='utf-8') as f:
+        json.dump(generated_data, f, ensure_ascii=False, indent=4)
+    print(f"\n--- Intermediate generated data saved to {config.GENERATED_DATA_PATH} ---")
 
-        # 1. 生成
-        cot_text = generate_cot_description(image_path)
-        
-        # 2. 解析
-        claims_dict = parse_cot_to_claims(cot_text)
-        all_claims = claims_dict["visual_evidence"] + claims_dict["summary_description"]
-        
-        # 3. 标注
-        is_valid_list = [label_claim_validity(image_path, claim) for claim in all_claims]
-        final_is_valid = 1 if all(is_valid_list) else 0
-        
-        calibration_data.append({
-            "image_path": image_path,
-            "generated_cot": cot_text,
-            "parsed_claims": claims_dict,
-            "is_valid": final_is_valid
-        })
+    # --- STAGE 2: Python Parsing and LLM Labeling ---
+    print("\n--- STAGE 2: Python Parsing and LLM Labeling ---")
+    llm, llm_tokenizer = local_models.load_llm()
+    calibration_data = []
+    with open(config.LLM_RAW_RESPONSE_LOG_PATH, 'a', encoding='utf-8') as log_file:
+        for data in tqdm(generated_data, desc="2/2 - Parsing and Labeling"):
+            data["parsed_claims"] = python_parse_cot_to_claims(data['generated_cot'])
+            all_claims = data["parsed_claims"].get("visual_evidence", []) + data["parsed_claims"].get("summary_description", [])
+            is_valid_list = []
+            if not all_claims:
+                is_valid_list.append(False)
+            else:
+                for claim in all_claims:
+                    label_prompt = f"""Evaluate the following claim based *only* on the provided background description. Respond with a single word: "Yes" if the claim is consistent and reasonable, or "No" if it is not. Do not provide any explanation or other words. Background description: '{data['context_description']}'\nClaim: '{claim}'"""
+                    response_text = local_models.generate_with_llm(llm, llm_tokenizer, label_prompt).strip()
+                    log_entry = {"image_path": data["image_path"], "task": "label_claim", "claim": claim, "prompt": label_prompt, "response": response_text}
+                    log_file.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+                    
+                    lower_response = response_text.lower()
+                    if "no" in lower_response or "否" in lower_response:
+                        is_valid_list.append(False)
+                    elif "yes" in lower_response or "是" in lower_response:
+                        is_valid_list.append(True)
+                    else:
+                        is_valid_list.append(False)
+                        print(f"Warning: Ambiguous response for claim validity: '{response_text}'. Defaulting to invalid.")
+            
+            final_is_valid = 1 if all(is_valid_list) else 0
+            calibration_data.append({"image_path": data["image_path"], "generated_cot": data["generated_cot"], "parsed_claims": data["parsed_claims"], "is_valid": final_is_valid})
+    del llm, llm_tokenizer
+    local_models.clear_memory()
+    print("--- LLM Unloaded ---")
 
     with open(config.CALIBRATION_SET_PATH, 'w', encoding='utf-8') as f:
         json.dump(calibration_data, f, ensure_ascii=False, indent=4)
-    print(f"Calibration set built and saved to {config.CALIBRATION_SET_PATH}")
+    print(f"\nCalibration set built and saved to {config.CALIBRATION_SET_PATH}")
+    print(f"LLM raw responses logged to {config.LLM_RAW_RESPONSE_LOG_PATH}")
+    print("\n--- DATA BUILDER FINISHED SUCCESSFULLY ---")
 
 if __name__ == "__main__":
     build_calibration_set()
