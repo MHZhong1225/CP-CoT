@@ -5,7 +5,7 @@ import gc
 from transformers import AutoModelForVision2Seq, AutoTokenizer, AutoModelForCausalLM
 from PIL import Image
 import config
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor, AutoModelForCausalLM
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -17,42 +17,68 @@ def clear_memory():
 
 def generate_with_mllm(image_path: str, prompt: str) -> str:
     """
-    Loads, uses, and then unloads the Qwen-VL model using the correct class.
+    Loads, uses, and then unloads the Qwen-VL model using the correct chat template and processor.
     """
     clear_memory()
-    print("Loading Target MLLM (Qwen-VL) with the correct Vision2Seq class...")
+    print("Loading Target MLLM (Qwen-VL)...")
+
+    processor = AutoProcessor.from_pretrained(config.TARGET_MLLM_NAME, trust_remote_code=True)
     
-    tokenizer = AutoTokenizer.from_pretrained(config.TARGET_MLLM_NAME, trust_remote_code=True)
-    
-    # === THE DEFINITIVE FIX: Use AutoModelForVision2Seq ===
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         config.TARGET_MLLM_NAME,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
         trust_remote_code=True
     ).to(device)
-    # === END FIX ===
     
     print("Target MLLM loaded. Generating...")
 
-    # The input preparation logic from before was correct for Qwen-VL's tokenizer.
-    query = [{'image': image_path}, {'text': prompt}]
-    formatted_query = tokenizer.from_list_format(query)
-    inputs = tokenizer(formatted_query, return_tensors='pt').to(device)
+    # Correct Fix: Create a structured message list for the chat template.
+    # Note that the prompt text comes BEFORE the image placeholder.
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image"}, 
+            ]
+        }
+    ]
+
+    # 1. Apply the chat template to get the formatted text prompt string.
+    text_prompt = processor.tokenizer.apply_chat_template(
+        messages, 
+        tokenize=False, 
+        add_generation_prompt=True
+    )
+
+    try:
+        image = Image.open(image_path)
+    except FileNotFoundError:
+        print(f"Error: Image file not found at {image_path}")
+        return "Error: Image file not found."
     
+    # 2. Pass the formatted text and the image to the processor.
+    inputs = processor(text=text_prompt, images=[image], return_tensors="pt").to(device)
+
+    # Generate output
     output_ids = model.generate(**inputs, max_new_tokens=200, do_sample=False)
     
-    response_ids = output_ids[0][len(inputs['input_ids'][0]):]
-    decoded_output = tokenizer.decode(response_ids, skip_special_tokens=True).strip()
+    # Decode and clean up the output
+    input_token_len = inputs['input_ids'].shape[1]
+    response_ids = output_ids[0][input_token_len:]
+    decoded_output = processor.decode(response_ids, skip_special_tokens=True).strip()
 
     # --- Release memory ---
     del model
-    del tokenizer
+    del processor
+    del inputs
+    del output_ids
+    del image
     clear_memory()
     print("Target MLLM unloaded.")
     
     return decoded_output
-
 def generate_with_llm(prompt: str) -> str:
     """
     Loads, uses, and then unloads the Judge LLM (a text-only model).
@@ -66,6 +92,8 @@ def generate_with_llm(prompt: str) -> str:
     model = AutoModelForCausalLM.from_pretrained(
         config.JUDGE_LLM_NAME,
         torch_dtype=torch.float16,
+        device_map="cuda",
+        cache_dir="/home/icdm/.cache/huggingface/hub/",
         low_cpu_mem_usage=True
     ).to(device)
     

@@ -7,7 +7,8 @@
 
 TARGET_MLLM_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
 # 裁判模型 (LLM)
-JUDGE_LLM_NAME = "openai/gpt-oss-20b"
+# JUDGE_LLM_NAME = "openai/gpt-oss-20b"
+JUDGE_LLM_NAME = "Qwen/Qwen3-8B-FP8"
 DATANAME = 'VQAv2'
 
 
