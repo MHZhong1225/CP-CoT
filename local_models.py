@@ -5,6 +5,7 @@ import gc
 from transformers import AutoModelForVision2Seq, AutoTokenizer, AutoModelForCausalLM
 from PIL import Image
 import config
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -24,7 +25,7 @@ def generate_with_mllm(image_path: str, prompt: str) -> str:
     tokenizer = AutoTokenizer.from_pretrained(config.TARGET_MLLM_NAME, trust_remote_code=True)
     
     # === THE DEFINITIVE FIX: Use AutoModelForVision2Seq ===
-    model = AutoModelForVision2Seq.from_pretrained(
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         config.TARGET_MLLM_NAME,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
